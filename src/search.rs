@@ -1,0 +1,145 @@
+use std::collections::HashMap;
+
+use uuid::Uuid;
+
+use crate::{
+    client::CassieClient,
+    error::{CassieError, Result},
+    types::{SearchResult, Vertex},
+};
+
+// ─── Tokenizer ────────────────────────────────────────────────────────────────
+
+/// Split text into lowercase alphabetic words (min 3 chars), deduplicated.
+pub fn tokenize(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    text.split(|c: char| !c.is_alphabetic())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 3)
+        .filter(|w| seen.insert(w.clone()))
+        .collect()
+}
+
+// ─── Index ────────────────────────────────────────────────────────────────────
+
+/// Write search words for a vertex into `cassie.search_tokens`.
+pub async fn index_vertex(client: &CassieClient, vertex: &Vertex) -> Result<()> {
+    let mut words = tokenize(&vertex.title);
+    if let Some(ref summary) = vertex.summary {
+        words.extend(tokenize(summary));
+    }
+    words.sort();
+    words.dedup();
+
+    for word in words {
+        client
+            .session
+            .query_unpaged(
+                "INSERT INTO cassie.search_tokens \
+                 (user_id, word, vertex_id, doc_id, title, summary, start_idx, end_idx) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    &vertex.user_id,
+                    &word,
+                    vertex.vertex_id,
+                    &vertex.doc_id,
+                    &vertex.title,
+                    &vertex.summary,
+                    vertex.start_idx as i32,
+                    vertex.end_idx as i32,
+                ),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Remove all search words for a vertex (called during delete).
+pub async fn delete_vertex_words(client: &CassieClient, vertex: &Vertex) -> Result<()> {
+    let mut words = tokenize(&vertex.title);
+    if let Some(ref summary) = vertex.summary {
+        words.extend(tokenize(summary));
+    }
+    words.sort();
+    words.dedup();
+
+    for word in words {
+        client
+            .session
+            .query_unpaged(
+                "DELETE FROM cassie.search_tokens \
+                 WHERE user_id = ? AND word = ? AND vertex_id = ?",
+                (&vertex.user_id, &word, vertex.vertex_id),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+/// Dirty word search: wordise query, union-match vertices, score by hit count, return top-K.
+pub async fn search(
+    client: &CassieClient,
+    user_id: &str,
+    query: &str,
+    top_k: usize,
+) -> Result<Vec<SearchResult>> {
+    let words = tokenize(query);
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // vertex_id → (score, SearchResult)
+    let mut hits: HashMap<Uuid, (u32, SearchResult)> = HashMap::new();
+
+    for word in &words {
+        let result = client
+            .session
+            .query_unpaged(
+                "SELECT vertex_id, doc_id, title, summary, start_idx, end_idx \
+                 FROM cassie.search_tokens \
+                 WHERE user_id = ? AND word = ?",
+                (user_id, word),
+            )
+            .await?;
+
+        let rows_result = result.into_rows_result()?;
+        let rows = rows_result
+            .rows::<(Uuid, String, String, Option<String>, i32, i32)>()
+            .map_err(|e| CassieError::RowDe(e.to_string()))?;
+
+        for row in rows {
+            let (vid, doc_id, title, summary, start_idx, end_idx) =
+                row.map_err(|e| CassieError::RowDe(e.to_string()))?;
+
+            let entry = hits.entry(vid).or_insert_with(|| {
+                (
+                    0,
+                    SearchResult {
+                        vertex_id: vid,
+                        doc_id,
+                        title,
+                        summary,
+                        score: 0,
+                        start_idx: start_idx as u32,
+                        end_idx: end_idx as u32,
+                    },
+                )
+            });
+            entry.0 += 1;
+        }
+    }
+
+    let mut results: Vec<SearchResult> = hits
+        .into_values()
+        .map(|(score, mut r)| {
+            r.score = score;
+            r
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.truncate(top_k);
+    Ok(results)
+}

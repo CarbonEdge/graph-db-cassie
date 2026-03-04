@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, master]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/carbonedge/cassie-api
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Unit tests (no DB required)
+        run: cargo test --lib -- --nocapture
+
+  build:
+    name: Build & Push
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=ref,event=branch
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Update devops values
+        if: github.ref_name == 'main' || github.ref_name == 'master'
+        env:
+          DEVOPS_TOKEN: ${{ secrets.DEVOPS_TOKEN }}
+          SHA_TAG: sha-${{ github.sha }}
+        run: |
+          git clone https://x-access-token:${DEVOPS_TOKEN}@github.com/carbonedge/runpod-devops.git devops
+          for env in dev production; do
+            FILE="devops/helm/values/cassie-${env}.yaml"
+            if [ -f "$FILE" ]; then
+              sed -i "s|tag:.*|tag: \"${SHA_TAG}\"|" "$FILE"
+            fi
+          done
+          cd devops
+          git config user.email "ci@carbonedge.ai"
+          git config user.name "CI"
+          git add helm/values/cassie-*.yaml
+          git diff --staged --quiet || git commit -m "cassie-api: deploy ${SHA_TAG}"
+          git push
