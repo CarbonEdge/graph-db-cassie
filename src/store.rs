@@ -179,7 +179,7 @@ pub async fn list(client: &CassieClient, user_id: &str) -> Result<Vec<DocumentIn
         let doc_type = DocType::from_str(&doc_type_str)?;
         let config: IndexConfig = config_json
             .as_deref()
-            .map(|s| serde_json::from_str(s))
+            .map(serde_json::from_str)
             .transpose()?
             .unwrap_or_default();
         let created_at = created_at_raw
@@ -326,7 +326,7 @@ async fn fetch_document_row(client: &CassieClient, user_id: &str, doc_id: &str) 
         let doc_type = DocType::from_str(&doc_type_str)?;
         let config: IndexConfig = config_json
             .as_deref()
-            .map(|s| serde_json::from_str(s))
+            .map(serde_json::from_str)
             .transpose()?
             .unwrap_or_default();
         let created_at = created_at_raw

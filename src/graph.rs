@@ -169,16 +169,16 @@ pub async fn get_ancestors(client: &CassieClient, vertex_id: Uuid) -> Result<Vec
             .await?;
 
         let rows_result = result.into_rows_result()?;
-        let rows = rows_result
+        let mut rows = rows_result
             .rows::<(Uuid,)>()
             .map_err(|e| CassieError::RowDe(e.to_string()))?;
 
-        let mut parent_id: Option<Uuid> = None;
-        for row in rows {
+        let parent_id = if let Some(row) = rows.next() {
             let (pid,) = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
-            parent_id = Some(pid);
-            break;
-        }
+            Some(pid)
+        } else {
+            None
+        };
 
         match parent_id {
             None => break,

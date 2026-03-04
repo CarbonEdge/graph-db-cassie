@@ -3,13 +3,13 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum CassieError {
     #[error("ScyllaDB execution error: {0}")]
-    Execution(#[from] scylla::errors::ExecutionError),
+    Execution(Box<scylla::errors::ExecutionError>),
 
     #[error("ScyllaDB new session error: {0}")]
-    NewSession(#[from] scylla::errors::NewSessionError),
+    NewSession(Box<scylla::errors::NewSessionError>),
 
     #[error("ScyllaDB rows result error: {0}")]
-    RowsResult(#[from] scylla::errors::IntoRowsResultError),
+    RowsResult(Box<scylla::errors::IntoRowsResultError>),
 
     #[error("ScyllaDB row deserialization error: {0}")]
     RowDe(String),
@@ -22,6 +22,24 @@ pub enum CassieError {
 
     #[error("Invalid data: {0}")]
     InvalidData(String),
+}
+
+impl From<scylla::errors::ExecutionError> for CassieError {
+    fn from(e: scylla::errors::ExecutionError) -> Self {
+        CassieError::Execution(Box::new(e))
+    }
+}
+
+impl From<scylla::errors::NewSessionError> for CassieError {
+    fn from(e: scylla::errors::NewSessionError) -> Self {
+        CassieError::NewSession(Box::new(e))
+    }
+}
+
+impl From<scylla::errors::IntoRowsResultError> for CassieError {
+    fn from(e: scylla::errors::IntoRowsResultError) -> Self {
+        CassieError::RowsResult(Box::new(e))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, CassieError>;
