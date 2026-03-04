@@ -33,10 +33,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self.0 {
             CassieError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            other => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                other.to_string(),
-            ),
+            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
@@ -124,15 +121,12 @@ fn router(state: AppState) -> Router {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "cassie_api=info".to_string()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "cassie_api=info".to_string()),
         )
         .init();
 
-    let host = std::env::var("CASSANDRA_HOST")
-        .unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let port = std::env::var("SERVER_PORT")
-        .unwrap_or_else(|_| "8080".to_string());
+    let host = std::env::var("CASSANDRA_HOST").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+    let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "8080".to_string());
 
     info!("Connecting to Cassandra at {host}");
 

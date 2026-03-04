@@ -163,8 +163,18 @@ pub async fn list(client: &CassieClient, user_id: &str) -> Result<Vec<DocumentIn
 
     let mut docs = Vec::new();
     for row in rows {
-        let (uid, created_at_raw, did, _root_id, filename, doc_type_str, description, total_pages, raw_content, config_json) =
-            row.map_err(|e| CassieError::RowDe(e.to_string()))?;
+        let (
+            uid,
+            created_at_raw,
+            did,
+            _root_id,
+            filename,
+            doc_type_str,
+            description,
+            total_pages,
+            raw_content,
+            config_json,
+        ) = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
 
         let doc_type = DocType::from_str(&doc_type_str)?;
         let config: IndexConfig = config_json
@@ -232,10 +242,7 @@ pub async fn delete(client: &CassieClient, user_id: &str, doc_id: &str) -> Resul
     for &vid in &all_ids {
         client
             .session
-            .query_unpaged(
-                "DELETE FROM cassie.vertices WHERE vertex_id = ?",
-                (vid,),
-            )
+            .query_unpaged("DELETE FROM cassie.vertices WHERE vertex_id = ?", (vid,))
             .await?;
     }
 
@@ -267,11 +274,7 @@ struct DocRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-async fn fetch_document_row(
-    client: &CassieClient,
-    user_id: &str,
-    doc_id: &str,
-) -> Result<DocRow> {
+async fn fetch_document_row(client: &CassieClient, user_id: &str, doc_id: &str) -> Result<DocRow> {
     use std::str::FromStr;
 
     type Row = (
@@ -303,8 +306,18 @@ async fn fetch_document_row(
         .map_err(|e| CassieError::RowDe(e.to_string()))?;
 
     for row in rows {
-        let (uid, created_at_raw, did, root_id, filename, doc_type_str, description, total_pages, raw_content, config_json) =
-            row.map_err(|e| CassieError::RowDe(e.to_string()))?;
+        let (
+            uid,
+            created_at_raw,
+            did,
+            root_id,
+            filename,
+            doc_type_str,
+            description,
+            total_pages,
+            raw_content,
+            config_json,
+        ) = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
 
         if did != doc_id {
             continue;

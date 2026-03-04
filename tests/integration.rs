@@ -6,15 +6,12 @@
 //! Run with: `cargo test -- --nocapture`
 
 use chrono::Utc;
-use graph_db_cassie::{
-    CassieClient, CassieConfig, DocType, DocumentIndex, IndexConfig, TreeNode,
-};
+use graph_db_cassie::{CassieClient, CassieConfig, DocType, DocumentIndex, IndexConfig, TreeNode};
 
 fn scylla_config() -> CassieConfig {
     CassieConfig {
         contact_points: vec![
-            std::env::var("SCYLLA_HOST")
-                .unwrap_or_else(|_| "127.0.0.1:9042".to_string()),
+            std::env::var("SCYLLA_HOST").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
         ],
         keyspace: "cassie_test".to_string(),
     }
@@ -105,10 +102,7 @@ async fn test_save_and_load_round_trip() {
 
     client.save(&index).await.expect("save failed");
 
-    let loaded = client
-        .load("rt_user", "rt_doc")
-        .await
-        .expect("load failed");
+    let loaded = client.load("rt_user", "rt_doc").await.expect("load failed");
 
     assert_eq!(loaded.doc_id, "rt_doc");
     assert_eq!(loaded.user_id, "rt_user");
@@ -221,7 +215,10 @@ async fn test_delete() {
 
     assert!(client.load("del_user", "del_doc").await.is_ok());
 
-    client.delete("del_user", "del_doc").await.expect("delete failed");
+    client
+        .delete("del_user", "del_doc")
+        .await
+        .expect("delete failed");
 
     assert!(
         client.load("del_user", "del_doc").await.is_err(),

@@ -213,7 +213,20 @@ type VertexRow = (
 
 fn row_to_vertex(row: VertexRow) -> Result<Vertex> {
     use std::str::FromStr;
-    let (vid, user_id, doc_id, vtype_str, title, summary, content, start_idx, end_idx, node_id, properties, created_at_raw) = row;
+    let (
+        vid,
+        user_id,
+        doc_id,
+        vtype_str,
+        title,
+        summary,
+        content,
+        start_idx,
+        end_idx,
+        node_id,
+        properties,
+        created_at_raw,
+    ) = row;
 
     let vtype = VertexType::from_str(&vtype_str)?;
     let created_at = created_at_raw
@@ -236,15 +249,11 @@ fn row_to_vertex(row: VertexRow) -> Result<Vertex> {
     })
 }
 
-const VERTEX_SELECT: &str =
-    "SELECT vertex_id, user_id, doc_id, vtype, title, summary, content, \
+const VERTEX_SELECT: &str = "SELECT vertex_id, user_id, doc_id, vtype, title, summary, content, \
      start_idx, end_idx, node_id, properties, created_at \
      FROM cassie.vertices";
 
-pub(crate) async fn fetch_vertex(
-    client: &CassieClient,
-    vertex_id: Uuid,
-) -> Result<Option<Vertex>> {
+pub(crate) async fn fetch_vertex(client: &CassieClient, vertex_id: Uuid) -> Result<Option<Vertex>> {
     let result = client
         .session
         .query_unpaged(
