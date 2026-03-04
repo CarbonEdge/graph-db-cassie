@@ -306,3 +306,5 @@ gh workflow run helm-deploy.yml -f service=cassie -f environment=production
 
 Cassandra and the API server are deployed together as a single Helm release.
 Other services reach the API via Kubernetes DNS: `cassie:8080`.
+
+version 0.0.1
