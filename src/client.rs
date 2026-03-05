@@ -76,6 +76,16 @@ impl CassieClient {
         crate::graph::get_ancestors(self, vertex_id).await
     }
 
+    // ─── Diagnostics ─────────────────────────────────────────────────────────
+
+    /// Run a trivial query to verify the session is alive.
+    pub async fn ping(&self) -> Result<()> {
+        self.session
+            .query_unpaged("SELECT now() FROM system.local", ())
+            .await?;
+        Ok(())
+    }
+
     // ─── Search API ──────────────────────────────────────────────────────────
 
     /// Dirty token search: split query into tokens, union match vertices, score

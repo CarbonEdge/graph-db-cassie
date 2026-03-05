@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
@@ -7,8 +7,14 @@ use axum::{
     routing::{delete, get, put},
     Json, Router,
 };
+use axum_prometheus::PrometheusMetricLayer;
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{trace as sdktrace, Resource};
 use serde::Deserialize;
-use tracing::info;
+use tower_http::trace::TraceLayer;
+use tracing::{info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use graph_db_cassie::{CassieClient, CassieConfig, CassieError, DocumentIndex, SearchResult};
 
@@ -43,8 +49,17 @@ type ApiResult<T> = Result<T, ApiError>;
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
+/// Liveness probe — always 200 while the process is alive.
 async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+/// Readiness probe — 200 only when Cassandra is reachable.
+async fn ready(State(state): State<AppState>) -> StatusCode {
+    match state.cassie.ping().await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 async fn save_document(
@@ -104,26 +119,97 @@ async fn search_documents(
 
 // ─── Router ──────────────────────────────────────────────────────────────────
 
-fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+fn router(state: AppState, prometheus_layer: PrometheusMetricLayer<'static>) -> Router {
+    // /metrics and probes are excluded from Prometheus instrumentation so
+    // they don't pollute histograms with high-frequency scrape noise.
+    let api_routes = Router::new()
         .route("/documents", put(save_document))
         .route("/documents/:user_id", get(list_documents))
         .route("/documents/:user_id/:doc_id", get(load_document))
         .route("/documents/:user_id/:doc_id", delete(delete_document))
         .route("/search/:user_id", get(search_documents))
+        .layer(prometheus_layer)
+        .layer(TraceLayer::new_for_http());
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .merge(api_routes)
         .with_state(state)
+}
+
+// ─── Observability init ───────────────────────────────────────────────────────
+
+fn init_otel(service_name: &str, endpoint: &str) {
+    use opentelemetry::trace::TracerProvider as _;
+
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(endpoint),
+        )
+        .with_trace_config(
+            sdktrace::Config::default().with_resource(Resource::new(vec![KeyValue::new(
+                "service.name",
+                service_name.to_owned(),
+            )])),
+        )
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .expect("Failed to initialize OTEL tracer");
+
+    let tracer = provider.tracer(service_name.to_owned());
+    opentelemetry::global::set_tracer_provider(provider);
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "cassie_api=info".into());
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(otel_layer)
+        .init();
+}
+
+// ─── Startup helpers ─────────────────────────────────────────────────────────
+
+async fn connect_with_retry(config: CassieConfig) -> CassieClient {
+    let mut delay = Duration::from_secs(2);
+    for attempt in 1u32.. {
+        match CassieClient::new(config.clone()).await {
+            Ok(client) => {
+                info!("Connected to Cassandra on attempt {attempt}");
+                return client;
+            }
+            Err(e) => {
+                if attempt >= 15 {
+                    panic!("Failed to connect to Cassandra after {attempt} attempts: {e}");
+                }
+                warn!(
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    error = %e,
+                    "Cassandra not ready, retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+        }
+    }
+    unreachable!()
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "cassie_api=info".to_string()),
-        )
-        .init();
+    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+
+    init_otel("cassie-api", &otel_endpoint);
 
     let host = std::env::var("CASSANDRA_HOST").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "8080".to_string());
@@ -135,9 +221,7 @@ async fn main() {
         keyspace: "cassie".to_string(),
     };
 
-    let client = CassieClient::new(config)
-        .await
-        .expect("Failed to connect to Cassandra");
+    let client = connect_with_retry(config).await;
 
     client
         .setup_schema()
@@ -150,13 +234,21 @@ async fn main() {
         cassie: Arc::new(client),
     };
 
+    let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
+
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
 
+    // Mount /metrics outside the main router so it is not self-instrumented.
+    let app = router(state, prometheus_layer).route(
+        "/metrics",
+        get(move || async move { metric_handle.render() }),
+    );
+
     info!("Listening on {addr}");
-    axum::serve(listener, router(state))
-        .await
-        .expect("Server error");
+    axum::serve(listener, app).await.expect("Server error");
+
+    opentelemetry::global::shutdown_tracer_provider();
 }
