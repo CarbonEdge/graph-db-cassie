@@ -46,9 +46,9 @@ services:
     ports:
       - "8081:8081"
     environment:
-      - CASSIE_URL=http://cassie:8080
-      - LLM_PROVIDER=anthropic
-      - LLM_MODEL=claude-sonnet-4-6
+      - CASSIE_URL=${CASSIE_URL:-http://cassie:8080}
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_MODEL=${LLM_MODEL:-claude-haiku-4-5-20251001}
       - LLM_API_KEY=${LLM_API_KEY}
       - API_KEY=${CASSIE_AI_API_KEY:-}
     depends_on:
