@@ -152,10 +152,11 @@ pub struct SearchResult {
     pub doc_id: String,
     pub title: String,
     pub summary: Option<String>,
-    /// Number of query tokens matched
+    /// TF-IDF-weighted relevance score
     pub score: u32,
     pub start_idx: u32,
     pub end_idx: u32,
+    pub node_id: String,
 }
 
 /// Configuration for CassieClient

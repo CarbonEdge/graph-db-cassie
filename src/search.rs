@@ -39,8 +39,8 @@ pub async fn index_vertex(client: &CassieClient, vertex: &Vertex) -> Result<()> 
             .session
             .query_unpaged(
                 "INSERT INTO cassie.search_tokens \
-                 (user_id, word, vertex_id, doc_id, title, summary, start_idx, end_idx) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (user_id, word, vertex_id, doc_id, title, summary, start_idx, end_idx, node_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     &vertex.user_id,
                     &word,
@@ -50,6 +50,7 @@ pub async fn index_vertex(client: &CassieClient, vertex: &Vertex) -> Result<()> 
                     &vertex.summary,
                     vertex.start_idx as i32,
                     vertex.end_idx as i32,
+                    &vertex.node_id,
                 ),
             )
             .await?;
@@ -84,7 +85,8 @@ pub async fn delete_vertex_words(client: &CassieClient, vertex: &Vertex) -> Resu
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 
-/// Dirty word search: wordise query, union-match vertices, score by hit count, return top-K.
+/// TF-IDF-ranked search: tokenise query, union-match vertices, weight rare words
+/// higher, return top-K by score.
 pub async fn search(
     client: &CassieClient,
     user_id: &str,
@@ -96,14 +98,14 @@ pub async fn search(
         return Ok(vec![]);
     }
 
-    // vertex_id → (score, SearchResult)
+    // vertex_id → (score_numerator, SearchResult)
     let mut hits: HashMap<Uuid, (u32, SearchResult)> = HashMap::new();
 
     for word in &words {
         let result = client
             .session
             .query_unpaged(
-                "SELECT vertex_id, doc_id, title, summary, start_idx, end_idx \
+                "SELECT vertex_id, doc_id, title, summary, start_idx, end_idx, node_id \
                  FROM cassie.search_tokens \
                  WHERE user_id = ? AND word = ?",
                 (user_id, word),
@@ -111,14 +113,17 @@ pub async fn search(
             .await?;
 
         let rows_result = result.into_rows_result()?;
-        let rows = rows_result
-            .rows::<(Uuid, String, String, Option<String>, i32, i32)>()
+        let rows: Vec<_> = rows_result
+            .rows::<(Uuid, String, String, Option<String>, i32, i32, Option<String>)>()
+            .map_err(|e| CassieError::RowDe(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| CassieError::RowDe(e.to_string()))?;
 
-        for row in rows {
-            let (vid, doc_id, title, summary, start_idx, end_idx) =
-                row.map_err(|e| CassieError::RowDe(e.to_string()))?;
+        // IDF weight: rare words score higher
+        let doc_freq = rows.len();
+        let idf_weight = 1000u32 / (1 + doc_freq as u32);
 
+        for (vid, doc_id, title, summary, start_idx, end_idx, node_id) in rows {
             let entry = hits.entry(vid).or_insert_with(|| {
                 (
                     0,
@@ -130,10 +135,11 @@ pub async fn search(
                         score: 0,
                         start_idx: start_idx as u32,
                         end_idx: end_idx as u32,
+                        node_id: node_id.unwrap_or_default(),
                     },
                 )
             });
-            entry.0 += 1;
+            entry.0 += idf_weight;
         }
     }
 
