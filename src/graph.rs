@@ -281,53 +281,71 @@ pub(crate) async fn fetch_all_vertices_for_doc(
     user_id: &str,
     doc_id: &str,
 ) -> Result<Vec<Vertex>> {
+    use futures::future::try_join_all;
+
+    // Step 1: get all vertex IDs from the lookup table (O(1) partition scan)
     let result = client
         .session
         .query_unpaged(
-            format!("{VERTEX_SELECT} WHERE user_id = ? AND doc_id = ? ALLOW FILTERING").as_str(),
+            "SELECT vertex_id FROM cassie.doc_vertices WHERE user_id = ? AND doc_id = ?",
             (user_id, doc_id),
         )
         .await?;
 
     let rows_result = result.into_rows_result()?;
-    let rows = rows_result
-        .rows::<VertexRow>()
-        .map_err(|e| CassieError::RowDe(e.to_string()))?;
+    let vertex_ids: Vec<Uuid> = rows_result
+        .rows::<(Uuid,)>()
+        .map_err(|e| CassieError::RowDe(e.to_string()))?
+        .map(|r| {
+            r.map(|(vid,)| vid)
+                .map_err(|e| CassieError::RowDe(e.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    let mut vertices = Vec::new();
-    for row in rows {
-        let r = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
-        vertices.push(row_to_vertex(r)?);
-    }
-    Ok(vertices)
+    // Step 2: fetch all vertices concurrently by their partition key (no filtering)
+    let futs: Vec<_> = vertex_ids
+        .iter()
+        .map(|&vid| fetch_vertex(client, vid))
+        .collect();
+    let results = try_join_all(futs).await?;
+    Ok(results.into_iter().flatten().collect())
 }
 
 pub(crate) async fn fetch_all_edges_for_doc(
     client: &CassieClient,
     doc_vertex_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<Uuid>>> {
+    use futures::future::try_join_all;
+
+    let futs: Vec<_> = doc_vertex_ids
+        .iter()
+        .map(|&from_id| async move {
+            let result = client
+                .session
+                .query_unpaged(
+                    "SELECT to_id FROM cassie.edges_out WHERE from_id = ? AND label = ?",
+                    (from_id, CONTAINS),
+                )
+                .await?;
+
+            let rows_result = result.into_rows_result()?;
+            let rows = rows_result
+                .rows::<(Uuid,)>()
+                .map_err(|e| CassieError::RowDe(e.to_string()))?;
+
+            let mut children = Vec::new();
+            for row in rows {
+                let (child_id,) = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
+                children.push(child_id);
+            }
+            Ok::<(Uuid, Vec<Uuid>), CassieError>((from_id, children))
+        })
+        .collect();
+
+    let pairs = try_join_all(futs).await?;
     let mut children_map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-
-    for &from_id in doc_vertex_ids {
-        let result = client
-            .session
-            .query_unpaged(
-                "SELECT to_id FROM cassie.edges_out WHERE from_id = ? AND label = ?",
-                (from_id, CONTAINS),
-            )
-            .await?;
-
-        let rows_result = result.into_rows_result()?;
-        let rows = rows_result
-            .rows::<(Uuid,)>()
-            .map_err(|e| CassieError::RowDe(e.to_string()))?;
-
-        let entry = children_map.entry(from_id).or_default();
-        for row in rows {
-            let (child_id,) = row.map_err(|e| CassieError::RowDe(e.to_string()))?;
-            entry.push(child_id);
-        }
+    for (from_id, children) in pairs {
+        children_map.insert(from_id, children);
     }
-
     Ok(children_map)
 }

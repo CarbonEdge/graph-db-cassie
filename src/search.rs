@@ -28,6 +28,9 @@ pub async fn index_vertex(client: &CassieClient, vertex: &Vertex) -> Result<()> 
     if let Some(ref summary) = vertex.summary {
         words.extend(tokenize(summary));
     }
+    if let Some(ref content) = vertex.content {
+        words.extend(tokenize(content));
+    }
     words.sort();
     words.dedup();
 
@@ -59,6 +62,9 @@ pub async fn delete_vertex_words(client: &CassieClient, vertex: &Vertex) -> Resu
     let mut words = tokenize(&vertex.title);
     if let Some(ref summary) = vertex.summary {
         words.extend(tokenize(summary));
+    }
+    if let Some(ref content) = vertex.content {
+        words.extend(tokenize(content));
     }
     words.sort();
     words.dedup();

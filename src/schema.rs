@@ -76,6 +76,28 @@ const CREATE_SEARCH_TOKENS: &str = r#"
     )
 "#;
 
+/// Lookup table: (user_id, doc_id) → all vertex_ids for that document.
+/// Eliminates ALLOW FILTERING on the vertices table.
+const CREATE_DOC_VERTICES: &str = r#"
+    CREATE TABLE IF NOT EXISTS cassie.doc_vertices (
+        user_id   TEXT,
+        doc_id    TEXT,
+        vertex_id UUID,
+        PRIMARY KEY ((user_id, doc_id), vertex_id)
+    )
+"#;
+
+/// Lookup table: (user_id, doc_id) → created_at timestamp.
+/// Enables O(1) lookup of the document primary key without ALLOW FILTERING.
+const CREATE_DOC_LOOKUP: &str = r#"
+    CREATE TABLE IF NOT EXISTS cassie.doc_lookup (
+        user_id    TEXT,
+        doc_id     TEXT,
+        created_at TIMESTAMP,
+        PRIMARY KEY ((user_id, doc_id))
+    )
+"#;
+
 /// Create keyspace and all tables. Safe to call multiple times (IF NOT EXISTS).
 pub async fn setup_schema(session: &Session) -> Result<()> {
     session.query_unpaged(CREATE_KEYSPACE, &[]).await?;
@@ -84,5 +106,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
     session.query_unpaged(CREATE_EDGES_IN, &[]).await?;
     session.query_unpaged(CREATE_DOCUMENTS, &[]).await?;
     session.query_unpaged(CREATE_SEARCH_TOKENS, &[]).await?;
+    session.query_unpaged(CREATE_DOC_VERTICES, &[]).await?;
+    session.query_unpaged(CREATE_DOC_LOOKUP, &[]).await?;
     Ok(())
 }

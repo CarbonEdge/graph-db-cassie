@@ -16,5 +16,33 @@ services:
       retries: 10
       start_period: 45s
 
+  cassie:
+    build:
+      context: .
+    container_name: cassie-api
+    ports:
+      - "8080:8080"
+    environment:
+      - CASSANDRA_HOST=cassandra:9042
+      - SERVER_PORT=8080
+      - RUST_LOG=cassie_api=debug
+    depends_on:
+      cassandra:
+        condition: service_healthy
+
+  cassie-ai:
+    build:
+      context: ../cassie-ai
+    container_name: cassie-ai
+    ports:
+      - "8081:8081"
+    environment:
+      - CASSIE_URL=http://cassie:8080
+      - LLM_PROVIDER=anthropic
+      - LLM_MODEL=claude-sonnet-4-6
+      - LLM_API_KEY=${LLM_API_KEY}
+    depends_on:
+      - cassie
+
 volumes:
   cassandra_data:

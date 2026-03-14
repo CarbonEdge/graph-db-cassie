@@ -16,7 +16,9 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use graph_db_cassie::{CassieClient, CassieConfig, CassieError, DocumentIndex, SearchResult};
+use graph_db_cassie::{
+    CassieClient, CassieConfig, CassieError, DocumentIndex, SearchResult, TreeNode,
+};
 
 // ─── App state ───────────────────────────────────────────────────────────────
 
@@ -62,12 +64,42 @@ async fn ready(State(state): State<AppState>) -> StatusCode {
     }
 }
 
+fn count_vertices(node: &TreeNode) -> usize {
+    1 + node.nodes.iter().map(count_vertices).sum::<usize>()
+}
+
 async fn save_document(
     State(state): State<AppState>,
     Json(index): Json<DocumentIndex>,
-) -> ApiResult<StatusCode> {
-    state.cassie.save(&index).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Response {
+    const MAX_VERTICES: usize = 2000;
+    const MAX_RAW_CONTENT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
+    let vertex_count = count_vertices(&index.tree);
+    if vertex_count > MAX_VERTICES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!("Document has {vertex_count} nodes, max is {MAX_VERTICES}")
+            })),
+        )
+            .into_response();
+    }
+
+    if let Some(ref rc) = index.raw_content {
+        if rc.len() > MAX_RAW_CONTENT_BYTES {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "raw_content exceeds 10MB limit"})),
+            )
+                .into_response();
+        }
+    }
+
+    match state.cassie.save(&index).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => ApiError::from(e).into_response(),
+    }
 }
 
 async fn load_document(

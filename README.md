@@ -1,18 +1,244 @@
-# Cassie — Graph DB on Cassandra
+# Cassie — Graph DB + AI Query Stack
 
-Cassandra-backed property graph store for hierarchical document indexes.
-Replaces the embedded Sled key-value store with a distributed graph that
-supports node-level search, tree traversal, and top-K relevance queries.
+Cassandra-backed document graph store with a web crawler for ingestion and an AI query layer powered by Claude.
 
 ---
 
-## Database Structure
+## How it works
+
+```
+URLs / PDFs
+     │
+     ▼
+data-pipeline/ingest.py        crawls URLs, extracts text, builds document trees
+     │
+     ▼  PUT /documents
+cassie-api  (port 8080)        stores documents as a property graph in Cassandra
+     │
+     ▼  GET /search + GET /documents
+cassie-ai   (port 8081)        retrieves context, calls Claude, returns answers
+```
+
+---
+
+## Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with Compose)
+- An [Anthropic API key](https://console.anthropic.com/)
+- Python 3.11+ (for running the ingestion script)
+
+---
+
+## 1. Start the local stack
+
+```bash
+cd D:\dev\runpod\graph-db-cassie
+
+# Copy the example env file and add your API key
+cp .env.example .env
+```
+
+Edit `.env`:
+```
+LLM_API_KEY=sk-ant-your-key-here
+```
+
+Then start everything:
+```bash
+docker compose up --build
+```
+
+This starts three containers:
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `cassie-db` | 9042 | Cassandra (data store) |
+| `cassie-api` | 8080 | Rust graph API |
+| `cassie-ai` | 8081 | FastAPI AI query service |
+
+> **First run takes 3–5 minutes** — the Rust API compiles inside Docker. Subsequent starts reuse the cached image.
+
+Wait until you see Cassie API logs appear, then confirm everything is healthy:
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8081/health
+```
+
+Both should return `{"status":"ok"}`.
+
+---
+
+## 2. Index your first document
+
+Install the ingestion dependencies:
+
+```bash
+cd D:\dev\runpod\data-pipeline
+pip install -r requirements.txt
+```
+
+Edit `config/urls.yaml` to add the document you want to ingest:
+
+```yaml
+sitemaps: []
+
+seeds:
+  - https://www.health.gov.za/wp-content/uploads/2025/07/Primary-Healthcare-Standard-Treatment-Guidelines-and-Essential-Medicines-List-8th-Edition-2024.pdf
+```
+
+Run the ingester:
+
+```bash
+python ingest.py \
+  --config config/urls.yaml \
+  --cassie-url http://localhost:8080 \
+  --user-id public
+```
+
+You should see output like:
+
+```
+2026-03-05 12:00:01 INFO ingest: Crawled 1 documents
+2026-03-05 12:00:03 INFO ingest: Pushed Primary-Healthcare-Standard-Treatment-...pdf (https://...)
+2026-03-05 12:00:03 INFO ingest: Ingest complete — crawled=1 pushed=1 skipped=0 errors=0
+```
+
+Confirm the document was stored:
+
+```bash
+curl http://localhost:8080/documents/public
+```
+
+---
+
+## 3. Ask a question
+
+```bash
+curl -X POST http://localhost:8081/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "public",
+    "question": "What is the first-line treatment for hypertension?",
+    "top_k": 5,
+    "depth": 1
+  }'
+```
+
+Response:
+
+```json
+{
+  "answer": "According to the PHC Standard Treatment Guidelines (8th Edition), the first-line treatment for hypertension is...",
+  "sources": [
+    {
+      "doc_id": "wp-content-uploads-2025-07-Primary-Healthcare-...",
+      "title": "Hypertension",
+      "node_id": "0003.0002",
+      "score": 4
+    }
+  ]
+}
+```
+
+---
+
+## 4. Adding more documents
+
+Add more URLs to `config/urls.yaml` and re-run `ingest.py`. Documents that are already indexed are skipped automatically — use `--force` to re-ingest:
+
+```yaml
+sitemaps:
+  - https://example.com/sitemap.xml   # all pages from a sitemap
+
+seeds:
+  - https://www.health.gov.za/wp-content/uploads/2025/07/Primary-Healthcare-Standard-Treatment-Guidelines-and-Essential-Medicines-List-8th-Edition-2024.pdf
+  - https://example.com/some-page.html
+```
+
+```bash
+# Skip already-indexed docs (default)
+python ingest.py --config config/urls.yaml --cassie-url http://localhost:8080 --user-id public
+
+# Force re-index everything
+python ingest.py --config config/urls.yaml --cassie-url http://localhost:8080 --user-id public --force
+```
+
+---
+
+## 5. Other useful commands
+
+**List all indexed documents:**
+```bash
+curl http://localhost:8080/documents/public
+```
+
+**Run a raw search (without AI):**
+```bash
+curl "http://localhost:8080/search/public?q=hypertension&top_k=5"
+```
+
+**Delete a document:**
+```bash
+curl -X DELETE http://localhost:8080/documents/public/<doc_id>
+```
+
+**Stop the stack:**
+```bash
+docker compose down
+
+# To also wipe Cassandra data:
+docker compose down -v
+```
+
+---
+
+## Repository layout
+
+```
+graph-db-cassie/          Rust API + docker-compose (this repo)
+├── src/                  Cassie API source (Axum + Scylla)
+├── docker-compose.yml    Local stack: Cassandra + cassie-api + cassie-ai
+├── Dockerfile            Builds the Rust API
+└── .env.example          Copy to .env and set LLM_API_KEY
+
+data-pipeline/            Python ingestion scripts
+├── ingest.py             Entry point — crawl → build → push
+├── crawler.py            Sitemap parser + HTML/PDF fetcher
+├── document_builder.py   Converts raw content → DocumentIndex tree
+├── cassie_client.py      HTTP client for the Cassie API
+└── config/urls.yaml      Edit this to configure what gets indexed
+
+cassie-ai/                FastAPI AI query service
+├── app/main.py           POST /query endpoint
+├── app/retriever.py      Graph-aware context assembly
+├── app/llm.py            Claude (or OpenAI) integration
+└── Dockerfile
+```
+
+---
+
+## Troubleshooting
+
+**Cassandra takes too long to start**
+Cassandra needs ~45 seconds to initialise on first run. The API container will wait for it. If it keeps failing, increase Docker Desktop's memory allocation (4 GB+ recommended).
+
+**PDF extraction is slow**
+Large PDFs are extracted in-process by `pymupdf4llm`. A 500-page document may take 30–60 seconds. This is normal.
+
+**`connection refused` on port 8080/8081**
+The API is still starting. Check `docker compose logs cassie` or `docker compose logs cassie-ai`.
+
+**Search returns no results**
+Make sure ingestion completed without errors. The search index is built at write time — if the push failed, there's nothing to search. Check `docker compose logs cassie-api` for write errors.
+
+---
+
+## Database internals
 
 ### Keyspace: `cassie`
 
-Five tables. Each document tree is decomposed into vertices (nodes) and edges
-(relationships), with two supporting tables for fast document listing and
-full-text search.
+Five tables. Each document tree is decomposed into vertices (nodes) and edges (relationships), with two supporting tables for fast document listing and full-text search.
 
 ```
 cassie keyspace
@@ -24,18 +250,12 @@ cassie keyspace
 └── search_tokens      — inverted word index for dirty search
 ```
 
----
-
 ### Table: `documents`
-
-The document registry. One row per `(user_id, doc_id)` pair. Sorted by
-creation time descending so listing a user's documents is a single
-partition read.
 
 ```
 PRIMARY KEY ((user_id), created_at DESC, doc_id)
 
-user_id      TEXT        — partition key (all docs for a user in one partition)
+user_id      TEXT        — partition key
 created_at   TIMESTAMP   — clustering key, newest first
 doc_id       TEXT        — clustering key
 root_id      UUID        — vertex_id of the root TreeNode
@@ -43,268 +263,53 @@ filename     TEXT
 doc_type     TEXT        — 'pdf' | 'markdown'
 description  TEXT
 total_pages  INT
-raw_content  TEXT        — original source text / page JSON
+raw_content  TEXT
 config_json  TEXT        — IndexConfig serialised as JSON
 ```
 
----
-
 ### Table: `vertices`
-
-Every `TreeNode` in every document tree is stored as one vertex row.
-A document with 6 sections produces 7 vertex rows (root + 6 children).
 
 ```
 PRIMARY KEY (vertex_id)
 
-vertex_id    UUID        — partition key, randomly generated per node
+vertex_id    UUID
 user_id      TEXT
 doc_id       TEXT
 vtype        TEXT        — 'document' | 'section' | 'leaf'
 title        TEXT
 summary      TEXT
-content      TEXT        — raw text for this section (optional)
-start_idx    INT         — start page / line
-end_idx      INT         — end page / line (inclusive)
-node_id      TEXT        — original TreeNode.node_id ("0001", "1.2.3")
+content      TEXT
+start_idx    INT
+end_idx      INT
+node_id      TEXT        — hierarchical id e.g. "0001.0002"
 properties   MAP<TEXT,TEXT>
 created_at   TIMESTAMP
 ```
 
----
-
-### Tables: `edges_out` and `edges_in`
-
-Edges encode the parent→child relationships of the original tree.
-Two tables give O(1) lookups in both directions without a secondary index.
+### Tables: `edges_out` / `edges_in`
 
 ```
-edges_out — forward traversal (get children of a node)
-PRIMARY KEY ((from_id, label), to_id)
-
-from_id   UUID    — parent vertex
-label     TEXT    — always 'CONTAINS' in the current schema
-to_id     UUID    — child vertex
-
-
-edges_in — reverse traversal (get parent / ancestors)
-PRIMARY KEY ((to_id, label), from_id)
-
-to_id     UUID    — child vertex
-label     TEXT    — always 'CONTAINS'
-from_id   UUID    — parent vertex
+edges_out  PRIMARY KEY ((from_id, label), to_id)   — parent → child
+edges_in   PRIMARY KEY ((to_id,   label), from_id) — child  → parent
 ```
-
----
 
 ### Table: `search_tokens`
-
-Inverted index built at write time. Each word in a vertex's `title` and
-`summary` gets one row. Query time: split the search string into words,
-fetch each word's rows in parallel, union the results, rank by hit count.
 
 ```
 PRIMARY KEY ((user_id, word), vertex_id)
 
-user_id    TEXT    — partition key (search is always scoped to one user)
-word       TEXT    — partition key, lowercase alphabetic, min 3 chars
-vertex_id  UUID    — clustering key
-doc_id     TEXT    — denormalised for fast display
-title      TEXT    — denormalised
-summary    TEXT    — denormalised
-start_idx  INT
-end_idx    INT
+One row per word per vertex. Words are lowercase, alphabetic-only, minimum 3 characters.
+Built at write time. Query time: union results across words, rank by hit count.
 ```
 
----
-
-## Data Flow
-
-### Write path (`save`)
-
-```
-DocumentIndex (nested TreeNode tree)
-        │
-        ▼
-   graph::decompose()          — DFS walk produces flat lists
-        │
-        ├─▶  Vec<Vertex>       — INSERT INTO cassie.vertices  (one row per node)
-        │
-        ├─▶  Vec<Edge>         — INSERT INTO cassie.edges_out  (parent → child)
-        │                        INSERT INTO cassie.edges_in   (child  → parent)
-        │
-        ├─▶  documents row     — INSERT INTO cassie.documents  (root_id stored here)
-        │
-        └─▶  search_tokens     — tokenise title+summary → INSERT one row per word
-```
-
-### Read path (`load`)
-
-```
-(user_id, doc_id)
-        │
-        ▼
-  cassie.documents              — fetch root_id + metadata
-        │
-        ▼
-  cassie.vertices               — fetch all vertices for doc  (ALLOW FILTERING)
-        │
-        ▼
-  cassie.edges_out              — fetch children for every vertex_id
-        │
-        ▼
-   graph::recompose()           — BFS rebuild of nested TreeNode tree
-        │
-        ▼
-   DocumentIndex
-```
-
-### Search path (`search`)
-
-```
-query string
-        │
-        ▼
-   tokenize()                   — lowercase, split on non-alpha, deduplicate, min 3 chars
-        │
-        ▼  (one query per word, can be parallelised)
-   cassie.search_tokens         — SELECT WHERE (user_id, word) = ?
-        │
-        ▼
-   union results, count hits per vertex_id
-        │
-        ▼
-   sort by score DESC, truncate to top_k
-        │
-        ▼
-   Vec<SearchResult>
-```
-
----
-
-## Schema Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        cassie keyspace                              │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  documents                                                   │  │
-│  │  PK: (user_id) | (created_at DESC, doc_id)                  │  │
-│  │                                                              │  │
-│  │  user_id · created_at · doc_id · root_id ──────────────┐   │  │
-│  │  filename · doc_type · description · total_pages        │   │  │
-│  │  raw_content · config_json                              │   │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-│                                                          │          │
-│                             points to root vertex        │          │
-│                                                          ▼          │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  vertices                                                    │  │
-│  │  PK: (vertex_id)                                             │  │
-│  │                                                              │  │
-│  │  vertex_id · user_id · doc_id · vtype                       │  │
-│  │  title · summary · content                                   │  │
-│  │  start_idx · end_idx · node_id                               │  │
-│  │  properties · created_at                                     │  │
-│  └──────────────┬───────────────────────────────────────────────┘  │
-│                 │                                                   │
-│        vertex_id referenced by edges                                │
-│                 │                                                   │
-│       ┌─────────┴──────────┐                                        │
-│       ▼                    ▼                                        │
-│  ┌──────────────┐    ┌──────────────┐                               │
-│  │  edges_out   │    │  edges_in    │                               │
-│  │  PK:         │    │  PK:         │                               │
-│  │  (from_id,   │    │  (to_id,     │                               │
-│  │   label)     │    │   label)     │                               │
-│  │  + to_id     │    │  + from_id   │                               │
-│  │              │    │              │                               │
-│  │  parent→child│    │  child→parent│                               │
-│  │  traversal   │    │  traversal   │                               │
-│  └──────────────┘    └──────────────┘                               │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  search_tokens                                               │  │
-│  │  PK: (user_id, word) | (vertex_id)                          │  │
-│  │                                                              │  │
-│  │  user_id · word · vertex_id · doc_id                        │  │
-│  │  title · summary · start_idx · end_idx                      │  │
-│  │                                                              │  │
-│  │  one row per word per vertex — built at write time           │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Example: A 6-node document
-
-Given a PDF with this structure:
-
-```
-Root (pages 1–20)
-├── Introduction  (pages 1–5)
-├── Methods       (pages 6–15)
-│   ├── Data Collection  (pages 6–10)
-│   └── Analysis         (pages 11–15)
-└── Conclusion    (pages 16–20)
-```
-
-Cassie stores:
-
-| Table | Rows written |
-|-------|-------------|
-| `documents` | 1 (the document record) |
-| `vertices` | 6 (one per TreeNode) |
-| `edges_out` | 5 (Root→Intro, Root→Methods, Root→Conclusion, Methods→DataCollection, Methods→Analysis) |
-| `edges_in` | 5 (same edges, reverse direction) |
-| `search_tokens` | N (one per unique word across all titles + summaries) |
-
----
-
-## HTTP API
-
-Accessed internally within the cluster at `cassie:8080`. No ingress, no auth.
+### HTTP API
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/ready` | Readiness check (pings Cassandra) |
 | `PUT` | `/documents` | Save a DocumentIndex (JSON body) |
-| `GET` | `/documents/:user_id` | List all documents for a user |
-| `GET` | `/documents/:user_id/:doc_id` | Load full document with tree |
+| `GET` | `/documents/:user_id` | List documents for a user |
+| `GET` | `/documents/:user_id/:doc_id` | Load full document tree |
 | `DELETE` | `/documents/:user_id/:doc_id` | Delete document and all data |
 | `GET` | `/search/:user_id?q=...&top_k=5` | Token search, returns top-K nodes |
-
----
-
-## Local Development
-
-```bash
-# Start Cassandra
-docker compose up -d
-
-# Run unit tests (no DB needed)
-cargo test --lib
-
-# Run integration tests (DB required, wait ~45s for Cassandra to be healthy)
-cargo test --test integration -- --nocapture
-
-# Run the API server
-CASSANDRA_HOST=127.0.0.1:9042 cargo run --bin cassie-api
-```
-
-## Deploy
-
-```bash
-# Dev
-gh workflow run helm-deploy.yml -f service=cassie -f environment=dev
-
-# Production
-gh workflow run helm-deploy.yml -f service=cassie -f environment=production
-```
-
-Cassandra and the API server are deployed together as a single Helm release.
-Other services reach the API via Kubernetes DNS: `cassie:8080`.
-
-version 0.0.1
