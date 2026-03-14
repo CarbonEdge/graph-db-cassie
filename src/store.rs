@@ -10,6 +10,8 @@ use crate::{
     types::{DocType, DocumentIndex, IndexConfig, TreeNode, Vertex},
 };
 
+const CONTAINS: &str = "CONTAINS";
+
 // ─── Save ─────────────────────────────────────────────────────────────────────
 
 /// Insert a single vertex into `cassie.vertices` and `cassie.doc_vertices`.
@@ -17,11 +19,8 @@ async fn save_vertex(client: &CassieClient, v: &Vertex) -> Result<()> {
     let created_ms = v.created_at.timestamp_millis();
     client
         .session
-        .query_unpaged(
-            "INSERT INTO cassie.vertices \
-             (vertex_id, user_id, doc_id, vtype, title, summary, content, \
-              start_idx, end_idx, node_id, properties, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        .execute_unpaged(
+            &client.prepared.insert_vertex,
             (
                 v.vertex_id,
                 &v.user_id,
@@ -40,8 +39,8 @@ async fn save_vertex(client: &CassieClient, v: &Vertex) -> Result<()> {
         .await?;
     client
         .session
-        .query_unpaged(
-            "INSERT INTO cassie.doc_vertices (user_id, doc_id, vertex_id) VALUES (?, ?, ?)",
+        .execute_unpaged(
+            &client.prepared.insert_doc_vertex,
             (&v.user_id, &v.doc_id, v.vertex_id),
         )
         .await?;
@@ -61,16 +60,16 @@ pub async fn save(client: &CassieClient, index: &DocumentIndex) -> Result<()> {
     for e in &edges {
         client
             .session
-            .query_unpaged(
-                "INSERT INTO cassie.edges_out (from_id, label, to_id) VALUES (?, ?, ?)",
+            .execute_unpaged(
+                &client.prepared.insert_edge_out,
                 (e.from_id, &e.label, e.to_id),
             )
             .await?;
 
         client
             .session
-            .query_unpaged(
-                "INSERT INTO cassie.edges_in (to_id, label, from_id) VALUES (?, ?, ?)",
+            .execute_unpaged(
+                &client.prepared.insert_edge_in,
                 (e.to_id, &e.label, e.from_id),
             )
             .await?;
@@ -81,11 +80,8 @@ pub async fn save(client: &CassieClient, index: &DocumentIndex) -> Result<()> {
     let config_json = serde_json::to_string(&index.config)?;
     client
         .session
-        .query_unpaged(
-            "INSERT INTO cassie.documents \
-             (user_id, created_at, doc_id, root_id, filename, doc_type, \
-              description, total_pages, raw_content, config_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        .execute_unpaged(
+            &client.prepared.insert_document,
             (
                 &index.user_id,
                 CqlTimestamp(created_ms),
@@ -104,8 +100,8 @@ pub async fn save(client: &CassieClient, index: &DocumentIndex) -> Result<()> {
     // 4. Write doc_lookup entry so fetch_document_row can find created_at by (user_id, doc_id)
     client
         .session
-        .query_unpaged(
-            "INSERT INTO cassie.doc_lookup (user_id, doc_id, created_at) VALUES (?, ?, ?)",
+        .execute_unpaged(
+            &client.prepared.insert_doc_lookup,
             (&index.user_id, &index.doc_id, CqlTimestamp(created_ms)),
         )
         .await?;
@@ -158,12 +154,7 @@ pub async fn list(client: &CassieClient, user_id: &str) -> Result<Vec<DocumentIn
 
     let result = client
         .session
-        .query_unpaged(
-            "SELECT user_id, created_at, doc_id, root_id, filename, doc_type, \
-             description, total_pages, raw_content, config_json \
-             FROM cassie.documents WHERE user_id = ?",
-            (user_id,),
-        )
+        .execute_unpaged(&client.prepared.select_documents_by_user, (user_id,))
         .await?;
 
     type DocRow = (
@@ -248,33 +239,26 @@ pub async fn delete(client: &CassieClient, user_id: &str, doc_id: &str) -> Resul
     for &vid in &all_ids {
         client
             .session
-            .query_unpaged(
-                "DELETE FROM cassie.edges_out WHERE from_id = ? AND label = 'CONTAINS'",
-                (vid,),
-            )
+            .execute_unpaged(&client.prepared.delete_edges_out, (vid, CONTAINS))
             .await?;
         client
             .session
-            .query_unpaged(
-                "DELETE FROM cassie.edges_in WHERE to_id = ? AND label = 'CONTAINS'",
-                (vid,),
-            )
+            .execute_unpaged(&client.prepared.delete_edges_in, (vid, CONTAINS))
             .await?;
     }
 
     for &vid in &all_ids {
         client
             .session
-            .query_unpaged("DELETE FROM cassie.vertices WHERE vertex_id = ?", (vid,))
+            .execute_unpaged(&client.prepared.delete_vertex, (vid,))
             .await?;
     }
 
     let created_ms = doc_row.created_at.timestamp_millis();
     client
         .session
-        .query_unpaged(
-            "DELETE FROM cassie.documents \
-             WHERE user_id = ? AND created_at = ? AND doc_id = ?",
+        .execute_unpaged(
+            &client.prepared.delete_document,
             (user_id, CqlTimestamp(created_ms), doc_id),
         )
         .await?;
@@ -282,17 +266,11 @@ pub async fn delete(client: &CassieClient, user_id: &str, doc_id: &str) -> Resul
     // Remove the lookup table entries
     client
         .session
-        .query_unpaged(
-            "DELETE FROM cassie.doc_vertices WHERE user_id = ? AND doc_id = ?",
-            (user_id, doc_id),
-        )
+        .execute_unpaged(&client.prepared.delete_doc_vertices, (user_id, doc_id))
         .await?;
     client
         .session
-        .query_unpaged(
-            "DELETE FROM cassie.doc_lookup WHERE user_id = ? AND doc_id = ?",
-            (user_id, doc_id),
-        )
+        .execute_unpaged(&client.prepared.delete_doc_lookup, (user_id, doc_id))
         .await?;
 
     Ok(())
@@ -319,10 +297,7 @@ async fn fetch_document_row(client: &CassieClient, user_id: &str, doc_id: &str) 
     // Step 1: look up created_at from the O(1) lookup table
     let lookup = client
         .session
-        .query_unpaged(
-            "SELECT created_at FROM cassie.doc_lookup WHERE user_id = ? AND doc_id = ?",
-            (user_id, doc_id),
-        )
+        .execute_unpaged(&client.prepared.select_doc_lookup, (user_id, doc_id))
         .await?;
 
     let lookup_rows = lookup.into_rows_result()?;
@@ -358,10 +333,8 @@ async fn fetch_document_row(client: &CassieClient, user_id: &str, doc_id: &str) 
 
     let result = client
         .session
-        .query_unpaged(
-            "SELECT user_id, created_at, doc_id, root_id, filename, doc_type, \
-             description, total_pages, raw_content, config_json \
-             FROM cassie.documents WHERE user_id = ? AND created_at = ? AND doc_id = ?",
+        .execute_unpaged(
+            &client.prepared.select_document_by_pk,
             (user_id, created_at_raw, doc_id),
         )
         .await?;

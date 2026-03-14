@@ -110,9 +110,8 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
     session.query_unpaged(CREATE_DOC_VERTICES, &[]).await?;
     session.query_unpaged(CREATE_DOC_LOOKUP, &[]).await?;
     // Best-effort: adds node_id to existing search_tokens tables (no-op if already present)
-    let _ = session.query_unpaged(
-        "ALTER TABLE cassie.search_tokens ADD node_id TEXT",
-        &[],
-    ).await;
+    let _ = session
+        .query_unpaged("ALTER TABLE cassie.search_tokens ADD node_id TEXT", &[])
+        .await;
     Ok(())
 }

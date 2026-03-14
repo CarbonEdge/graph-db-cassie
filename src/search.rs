@@ -37,10 +37,8 @@ pub async fn index_vertex(client: &CassieClient, vertex: &Vertex) -> Result<()> 
     for word in words {
         client
             .session
-            .query_unpaged(
-                "INSERT INTO cassie.search_tokens \
-                 (user_id, word, vertex_id, doc_id, title, summary, start_idx, end_idx, node_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            .execute_unpaged(
+                &client.prepared.insert_search_token,
                 (
                     &vertex.user_id,
                     &word,
@@ -73,9 +71,8 @@ pub async fn delete_vertex_words(client: &CassieClient, vertex: &Vertex) -> Resu
     for word in words {
         client
             .session
-            .query_unpaged(
-                "DELETE FROM cassie.search_tokens \
-                 WHERE user_id = ? AND word = ? AND vertex_id = ?",
+            .execute_unpaged(
+                &client.prepared.delete_search_token,
                 (&vertex.user_id, &word, vertex.vertex_id),
             )
             .await?;
@@ -104,17 +101,20 @@ pub async fn search(
     for word in &words {
         let result = client
             .session
-            .query_unpaged(
-                "SELECT vertex_id, doc_id, title, summary, start_idx, end_idx, node_id \
-                 FROM cassie.search_tokens \
-                 WHERE user_id = ? AND word = ?",
-                (user_id, word),
-            )
+            .execute_unpaged(&client.prepared.select_search_tokens, (user_id, word))
             .await?;
 
         let rows_result = result.into_rows_result()?;
         let rows: Vec<_> = rows_result
-            .rows::<(Uuid, String, String, Option<String>, i32, i32, Option<String>)>()
+            .rows::<(
+                Uuid,
+                String,
+                String,
+                Option<String>,
+                i32,
+                i32,
+                Option<String>,
+            )>()
             .map_err(|e| CassieError::RowDe(e.to_string()))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| CassieError::RowDe(e.to_string()))?;

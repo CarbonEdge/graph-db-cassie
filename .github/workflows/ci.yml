@@ -32,6 +32,32 @@ jobs:
       - name: Unit tests (no DB required)
         run: cargo test --lib -- --nocapture
 
+  # integration-test:
+  #   name: Integration Tests
+  #   runs-on: ubuntu-latest
+  #   services:
+  #     cassandra:
+  #       image: cassandra:5.0
+  #       ports:
+  #         - "9042:9042"
+  #       env:
+  #         MAX_HEAP_SIZE: 256m
+  #         HEAP_NEWSIZE: 64m
+  #       options: >-
+  #         --health-cmd "cqlsh -e 'SELECT now() FROM system.local'"
+  #         --health-interval 15s
+  #         --health-timeout 10s
+  #         --health-retries 20
+  #         --health-start-period 90s
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - name: Integration tests
+  #       env:
+  #         CASSANDRA_HOST: "127.0.0.1:9042"
+  #       run: cargo test --test integration -- --nocapture
+
   build:
     name: Build & Push
     needs: test

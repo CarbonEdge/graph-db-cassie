@@ -134,10 +134,7 @@ fn build_node(
 pub async fn get_children(client: &CassieClient, vertex_id: Uuid) -> Result<Vec<Vertex>> {
     let result = client
         .session
-        .query_unpaged(
-            "SELECT to_id FROM cassie.edges_out WHERE from_id = ? AND label = ?",
-            (vertex_id, CONTAINS),
-        )
+        .execute_unpaged(&client.prepared.select_edges_out, (vertex_id, CONTAINS))
         .await?;
 
     let rows_result = result.into_rows_result()?;
@@ -162,10 +159,7 @@ pub async fn get_ancestors(client: &CassieClient, vertex_id: Uuid) -> Result<Vec
     loop {
         let result = client
             .session
-            .query_unpaged(
-                "SELECT from_id FROM cassie.edges_in WHERE to_id = ? AND label = ?",
-                (current, CONTAINS),
-            )
+            .execute_unpaged(&client.prepared.select_edges_in, (current, CONTAINS))
             .await?;
 
         let rows_result = result.into_rows_result()?;
@@ -249,17 +243,10 @@ fn row_to_vertex(row: VertexRow) -> Result<Vertex> {
     })
 }
 
-const VERTEX_SELECT: &str = "SELECT vertex_id, user_id, doc_id, vtype, title, summary, content, \
-     start_idx, end_idx, node_id, properties, created_at \
-     FROM cassie.vertices";
-
 pub(crate) async fn fetch_vertex(client: &CassieClient, vertex_id: Uuid) -> Result<Option<Vertex>> {
     let result = client
         .session
-        .query_unpaged(
-            format!("{VERTEX_SELECT} WHERE vertex_id = ?").as_str(),
-            (vertex_id,),
-        )
+        .execute_unpaged(&client.prepared.select_vertex, (vertex_id,))
         .await?;
 
     let rows_result = result.into_rows_result()?;
@@ -286,10 +273,7 @@ pub(crate) async fn fetch_all_vertices_for_doc(
     // Step 1: get all vertex IDs from the lookup table (O(1) partition scan)
     let result = client
         .session
-        .query_unpaged(
-            "SELECT vertex_id FROM cassie.doc_vertices WHERE user_id = ? AND doc_id = ?",
-            (user_id, doc_id),
-        )
+        .execute_unpaged(&client.prepared.select_doc_vertex_ids, (user_id, doc_id))
         .await?;
 
     let rows_result = result.into_rows_result()?;
@@ -322,10 +306,7 @@ pub(crate) async fn fetch_all_edges_for_doc(
         .map(|&from_id| async move {
             let result = client
                 .session
-                .query_unpaged(
-                    "SELECT to_id FROM cassie.edges_out WHERE from_id = ? AND label = ?",
-                    (from_id, CONTAINS),
-                )
+                .execute_unpaged(&client.prepared.select_edges_out, (from_id, CONTAINS))
                 .await?;
 
             let rows_result = result.into_rows_result()?;

@@ -5,6 +5,7 @@ use scylla::client::session_builder::SessionBuilder;
 
 use crate::{
     error::Result,
+    prepared::Prepared,
     schema,
     types::{CassieConfig, DocumentIndex, SearchResult, Vertex},
 };
@@ -16,30 +17,33 @@ use crate::{
 #[derive(Clone)]
 pub struct CassieClient {
     pub(crate) session: Arc<Session>,
+    pub(crate) prepared: Arc<Prepared>,
     #[allow(dead_code)]
     pub(crate) keyspace: String,
 }
 
 impl CassieClient {
-    /// Connect to ScyllaDB and return a ready client.
-    ///
-    /// Does NOT run schema migrations automatically — call `setup_schema()` once
-    /// before first use (it is idempotent).
+    /// Connect to ScyllaDB, run schema migrations, and prepare all hot-path
+    /// statements in parallel.  Returns a fully ready client.
     pub async fn new(config: CassieConfig) -> Result<Self> {
         let session = SessionBuilder::new()
             .known_nodes(&config.contact_points)
             .build()
             .await?;
 
+        schema::setup_schema(&session).await?;
+        let prepared = Prepared::new(&session).await?;
+
         Ok(Self {
             session: Arc::new(session),
             keyspace: config.keyspace,
+            prepared: Arc::new(prepared),
         })
     }
 
-    /// Create keyspace and all tables (idempotent — safe to call on every startup).
+    /// No-op kept for backward compatibility — schema is now set up in `new()`.
     pub async fn setup_schema(&self) -> Result<()> {
-        schema::setup_schema(&self.session).await
+        Ok(())
     }
 
     // ─── Drop-in PageIndexStore API ──────────────────────────────────────────

@@ -19,6 +19,7 @@
 pub mod client;
 pub mod error;
 pub mod graph;
+pub mod prepared;
 pub mod schema;
 pub mod search;
 pub mod store;

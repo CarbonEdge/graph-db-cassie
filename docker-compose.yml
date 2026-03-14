@@ -40,7 +40,7 @@ services:
 
   cassie-ai:
     build:
-      context: ../cassie-ai
+      context: ../ai-context-pipeline/cassie-ai
     container_name: cassie-ai
     restart: unless-stopped
     ports:
