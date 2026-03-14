@@ -2,6 +2,7 @@ services:
   cassandra:
     image: cassandra:5.0
     container_name: cassie-db
+    restart: unless-stopped
     ports:
       - "9042:9042"
     environment:
@@ -20,20 +21,28 @@ services:
     build:
       context: .
     container_name: cassie-api
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       - CASSANDRA_HOST=cassandra:9042
       - SERVER_PORT=8080
-      - RUST_LOG=cassie_api=debug
+      - RUST_LOG=cassie_api=info
     depends_on:
       cassandra:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   cassie-ai:
     build:
       context: ../cassie-ai
     container_name: cassie-ai
+    restart: unless-stopped
     ports:
       - "8081:8081"
     environment:
@@ -41,8 +50,16 @@ services:
       - LLM_PROVIDER=anthropic
       - LLM_MODEL=claude-sonnet-4-6
       - LLM_API_KEY=${LLM_API_KEY}
+      - API_KEY=${CASSIE_AI_API_KEY:-}
     depends_on:
-      - cassie
+      cassie:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   cassandra_data:
