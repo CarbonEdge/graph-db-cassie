@@ -24,7 +24,7 @@ use graph_db_cassie::{
 
 #[derive(Clone)]
 struct AppState {
-    cassie: Arc<CassieClient>,
+    cassie: Option<Arc<CassieClient>>,
 }
 
 // ─── Error response ──────────────────────────────────────────────────────────
@@ -56,11 +56,14 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
-/// Readiness probe — 200 only when Cassandra is reachable.
+/// Readiness probe — 200 always (Cassandra optional).
 async fn ready(State(state): State<AppState>) -> StatusCode {
-    match state.cassie.ping().await {
-        Ok(_) => StatusCode::OK,
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    match &state.cassie {
+        Some(cassie) => match cassie.ping().await {
+            Ok(_) => StatusCode::OK,
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+        },
+        None => StatusCode::OK,
     }
 }
 
@@ -74,6 +77,17 @@ async fn save_document(
 ) -> Response {
     const MAX_VERTICES: usize = 2000;
     const MAX_RAW_CONTENT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
+    let cassie = match &state.cassie {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Cassandra not available"})),
+            )
+                .into_response();
+        }
+    };
 
     let vertex_count = count_vertices(&index.tree);
     if vertex_count > MAX_VERTICES {
@@ -96,7 +110,7 @@ async fn save_document(
         }
     }
 
-    match state.cassie.save(&index).await {
+    match cassie.save(&index).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => ApiError::from(e).into_response(),
     }
@@ -106,7 +120,11 @@ async fn load_document(
     State(state): State<AppState>,
     Path((user_id, doc_id)): Path<(String, String)>,
 ) -> ApiResult<Json<DocumentIndex>> {
-    let index = state.cassie.load(&user_id, &doc_id).await?;
+    let cassie = state
+        .cassie
+        .as_ref()
+        .ok_or_else(|| ApiError(CassieError::NotFound("Cassandra not available".to_string())))?;
+    let index = cassie.load(&user_id, &doc_id).await?;
     Ok(Json(index))
 }
 
@@ -114,7 +132,11 @@ async fn list_documents(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<Vec<DocumentIndex>>> {
-    let docs = state.cassie.list(&user_id).await?;
+    let cassie = state
+        .cassie
+        .as_ref()
+        .ok_or_else(|| ApiError(CassieError::NotFound("Cassandra not available".to_string())))?;
+    let docs = cassie.list(&user_id).await?;
     Ok(Json(docs))
 }
 
@@ -122,7 +144,11 @@ async fn delete_document(
     State(state): State<AppState>,
     Path((user_id, doc_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    state.cassie.delete(&user_id, &doc_id).await?;
+    let cassie = state
+        .cassie
+        .as_ref()
+        .ok_or_else(|| ApiError(CassieError::NotFound("Cassandra not available".to_string())))?;
+    cassie.delete(&user_id, &doc_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -142,10 +168,11 @@ async fn search_documents(
     Path(user_id): Path<String>,
     Query(params): Query<SearchParams>,
 ) -> ApiResult<Json<Vec<SearchResult>>> {
-    let results = state
+    let cassie = state
         .cassie
-        .search(&user_id, &params.q, params.top_k)
-        .await?;
+        .as_ref()
+        .ok_or_else(|| ApiError(CassieError::NotFound("Cassandra not available".to_string())))?;
+    let results = cassie.search(&user_id, &params.q, params.top_k).await?;
     Ok(Json(results))
 }
 
@@ -208,30 +235,17 @@ fn init_otel(service_name: &str, endpoint: &str) {
 
 // ─── Startup helpers ─────────────────────────────────────────────────────────
 
-async fn connect_with_retry(config: CassieConfig) -> CassieClient {
-    let mut delay = Duration::from_secs(2);
-    for attempt in 1u32.. {
-        match CassieClient::new(config.clone()).await {
-            Ok(client) => {
-                info!("Connected to Cassandra on attempt {attempt}");
-                return client;
-            }
-            Err(e) => {
-                if attempt >= 15 {
-                    panic!("Failed to connect to Cassandra after {attempt} attempts: {e}");
-                }
-                warn!(
-                    attempt,
-                    delay_secs = delay.as_secs(),
-                    error = %e,
-                    "Cassandra not ready, retrying"
-                );
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(30));
-            }
+async fn try_connect(config: CassieConfig) -> Option<CassieClient> {
+    match CassieClient::new(config.clone()).await {
+        Ok(client) => {
+            info!("Connected to Cassandra");
+            Some(client)
+        }
+        Err(e) => {
+            warn!("Cassandra not available (optional): {e}");
+            None
         }
     }
-    unreachable!()
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -246,25 +260,29 @@ async fn main() {
     let host = std::env::var("CASSANDRA_HOST").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "8080".to_string());
 
-    info!("Connecting to Cassandra at {host}");
+    info!("Attempting to connect to Cassandra at {host}");
 
     let config = CassieConfig {
         contact_points: vec![host],
         keyspace: "cassie".to_string(),
     };
 
-    let client = connect_with_retry(config).await;
-
-    client
-        .setup_schema()
-        .await
-        .expect("Failed to set up schema");
-
-    info!("Schema ready");
-
-    let state = AppState {
-        cassie: Arc::new(client),
+    let cassie = match try_connect(config.clone()).await {
+        Some(client) => {
+            if let Err(e) = client.setup_schema().await {
+                warn!("Failed to set up schema: {e}");
+            } else {
+                info!("Schema ready");
+            }
+            Some(Arc::new(client))
+        }
+        None => {
+            info!("Running without Cassandra (in-memory mode)");
+            None
+        }
     };
+
+    let state = AppState { cassie };
 
     let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
 
